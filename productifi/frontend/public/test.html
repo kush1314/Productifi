@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Productifi — Feature Tests</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: ui-monospace, 'Cascadia Code', monospace; background: #0f172a; color: #94a3b8; padding: 24px; line-height: 1.6; }
+    h1 { color: #f1f5f9; font-size: 20px; margin-bottom: 4px; }
+    .sub { color: #64748b; font-size: 13px; margin-bottom: 24px; }
+    .card { background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 18px; margin-bottom: 14px; }
+    .card h2 { color: #e2e8f0; font-size: 14px; margin-bottom: 12px; letter-spacing: 0.05em; text-transform: uppercase; }
+    button { display: inline-flex; align-items: center; gap: 6px; padding: 8px 14px; border: none; border-radius: 6px; cursor: pointer; font-family: inherit; font-size: 12px; font-weight: 700; margin: 3px; transition: filter 0.15s; }
+    button:hover { filter: brightness(1.15); }
+    .btn-blue   { background: #4753ff; color: #fff; }
+    .btn-green  { background: #16a34a; color: #fff; }
+    .btn-orange { background: #ea580c; color: #fff; }
+    .btn-red    { background: #dc2626; color: #fff; }
+    .btn-gray   { background: #334155; color: #cbd5e1; }
+    .pill { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 99px; font-size: 12px; font-weight: 600; }
+    .ok   { background: rgba(74,222,128,.12); color: #4ade80; border: 1px solid rgba(74,222,128,.25); }
+    .fail { background: rgba(248,113,113,.12); color: #f87171; border: 1px solid rgba(248,113,113,.25); }
+    .warn { background: rgba(251,191,36,.12);  color: #fbbf24; border: 1px solid rgba(251,191,36,.25); }
+    .info { background: rgba(71,83,255,.15);   color: #818cf8; border: 1px solid rgba(71,83,255,.3); }
+    #amp-bar-bg { width: 100%; height: 10px; background: #0f172a; border-radius: 5px; overflow: hidden; margin: 8px 0; }
+    #amp-bar    { height: 100%; background: #4753ff; border-radius: 5px; width: 0%; transition: width 0.1s; }
+    #timer-bg   { width: 100%; height: 6px; background: #0f172a; border-radius: 3px; overflow: hidden; margin: 6px 0; }
+    #timer-fill { height: 100%; background: #f97316; border-radius: 3px; width: 0%; transition: width 0.15s; }
+    #log { height: 220px; overflow-y: auto; background: #0f172a; border-radius: 6px; padding: 10px; font-size: 11px; }
+    .ll { padding: 2px 0; border-bottom: 1px solid rgba(255,255,255,.04); }
+    .ll.ok   { color: #4ade80; }
+    .ll.fail { color: #f87171; }
+    .ll.warn { color: #fbbf24; }
+    .ll.info { color: #818cf8; }
+    .ll.notif{ color: #c084fc; }
+    .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+  </style>
+</head>
+<body>
+
+<h1>🔬 Productifi — Notification &amp; Audio Self-Test</h1>
+<p class="sub">Run top-to-bottom. After clicking "Start Mic", switch to Gmail or another tab and talk for 3+ seconds.</p>
+
+<!-- ── 1. Service Worker ─────────────────────────────────────── -->
+<div class="card">
+  <h2>1 · Service Worker</h2>
+  <div class="row">
+    SW status: <span id="sw-badge" class="pill warn">checking…</span>
+  </div>
+  <button class="btn-blue" onclick="checkSW()">Re-check SW</button>
+</div>
+
+<!-- ── 2. Notification Permission ───────────────────────────── -->
+<div class="card">
+  <h2>2 · Notification Permission</h2>
+  <div class="row">
+    Permission: <span id="perm-badge" class="pill warn">…</span>
+  </div>
+  <button class="btn-blue"   onclick="requestPerm()">Request Permission</button>
+  <button class="btn-green"  onclick="testDirect()">Send Direct Notification</button>
+  <button class="btn-green"  onclick="testSW()">Send SW Notification</button>
+  <button class="btn-orange" onclick="testBoth()">Send Both (recommended)</button>
+</div>
+
+<!-- ── 3. Audio + 3-second trigger ──────────────────────────── -->
+<div class="card">
+  <h2>3 · Audio Amplitude → 3 s Notification</h2>
+  <div class="row">
+    Mic: <span id="mic-badge" class="pill warn">off</span>
+    &nbsp;Amplitude: <span id="amp-val">--</span>
+    &nbsp;Threshold: <span id="thresh-val">14</span>
+  </div>
+  <div id="amp-bar-bg"><div id="amp-bar"></div></div>
+  <div class="row" style="margin-top:4px;">
+    Talking timer: <strong id="talk-secs" style="color:#f97316">0.00 s</strong> / 3 s
+  </div>
+  <div id="timer-bg"><div id="timer-fill"></div></div>
+
+  <div style="margin: 10px 0; display:flex; align-items:center; gap:8px;">
+    <label style="font-size:12px;">Threshold (lower = more sensitive):</label>
+    <input id="thresh-input" type="range" min="3" max="40" value="14"
+           style="flex:1;" oninput="updateThresh(this.value)" />
+    <span id="thresh-display">14</span>
+  </div>
+
+  <button class="btn-blue" onclick="startMic()">▶ Start Mic</button>
+  <button class="btn-red"  onclick="stopMic()">■ Stop Mic</button>
+
+  <p style="font-size:11px; color:#64748b; margin-top:10px;">
+    ① Click "Start Mic" &amp; allow the browser prompt.<br>
+    ② Switch to <strong style="color:#cbd5e1">another tab</strong> (e.g. Gmail) and talk for 3+ seconds.<br>
+    ③ A Chrome notification should pop up on <em>that</em> tab.
+  </p>
+</div>
+
+<!-- ── 4. Event Log ──────────────────────────────────────────── -->
+<div class="card">
+  <h2>4 · Event Log</h2>
+  <button class="btn-gray" onclick="clearLog()">Clear</button>
+  <div id="log" style="margin-top:8px;"></div>
+</div>
+
+<script>
+// ── Utilities ─────────────────────────────────────────────────────────────────
+const $ = id => document.getElementById(id);
+
+function log(msg, type = 'info') {
+  const el = $('log');
+  const d = document.createElement('div');
+  d.className = 'll ' + type;
+  d.textContent = '[' + new Date().toLocaleTimeString() + '] ' + msg;
+  el.prepend(d);
+}
+function clearLog() { $('log').innerHTML = ''; }
+
+function updatePermBadge() {
+  const p = ('Notification' in window) ? Notification.permission : 'unsupported';
+  const badge = $('perm-badge');
+  badge.textContent = p;
+  badge.className = 'pill ' + (p === 'granted' ? 'ok' : p === 'denied' ? 'fail' : 'warn');
+}
+updatePermBadge();
+
+// ── 1. SW check ────────────────────────────────────────────────────────────
+async function checkSW() {
+  const b = $('sw-badge');
+  if (!('serviceWorker' in navigator)) {
+    b.textContent = 'Not supported'; b.className = 'pill fail';
+    log('Service Worker not supported in this browser.', 'fail'); return;
+  }
+  const regs = await navigator.serviceWorker.getRegistrations();
+  if (regs.length > 0) {
+    b.textContent = 'Registered (' + regs.length + ')'; b.className = 'pill ok';
+    log('SW registered: ' + regs.map(r => r.scope).join(', '), 'ok');
+  } else {
+    b.textContent = 'Not registered'; b.className = 'pill warn';
+    log('No SW found — open http://127.0.0.1:5173/ first so the app registers it.', 'warn');
+  }
+}
+checkSW();
+
+// ── 2. Permission ─────────────────────────────────────────────────────────
+async function requestPerm() {
+  if (!('Notification' in window)) { log('Notifications not supported.', 'fail'); return; }
+  log('Requesting notification permission…');
+  const p = await Notification.requestPermission();
+  log('Result: ' + p, p === 'granted' ? 'ok' : 'fail');
+  updatePermBadge();
+}
+
+function testDirect() {
+  if (Notification.permission !== 'granted') { log('Need permission first.', 'fail'); return; }
+  try {
+    new Notification('Productifi Test ✅ Direct', {
+      body: 'Direct Notification API — appears on any active tab.',
+      tag:  'productifi-test-direct',
+    });
+    log('Direct notification sent.', 'ok');
+  } catch(e) { log('Direct failed: ' + e, 'fail'); }
+}
+
+async function testSW() {
+  if (!('serviceWorker' in navigator)) { log('SW not available.', 'fail'); return; }
+  if (Notification.permission !== 'granted') { log('Need permission first.', 'fail'); return; }
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    await reg.showNotification('Productifi Test ✅ SW', {
+      body: 'Service Worker notification — most reliable for cross-tab delivery.',
+      tag:  'productifi-test-sw',
+    });
+    log('SW notification sent.', 'ok');
+  } catch(e) { log('SW notification failed: ' + e, 'fail'); }
+}
+
+async function testBoth() {
+  testDirect();
+  await testSW();
+  log('Both channels fired.', 'ok');
+}
+
+// ── 3. Audio / 3-second trigger ───────────────────────────────────────────
+let audioCtx    = null;
+let analyser    = null;
+let micStream   = null;
+let audioTimer  = null;
+let talkStartMs = null;
+let THRESHOLD   = 14;
+
+function updateThresh(v) {
+  THRESHOLD = Number(v);
+  $('thresh-val').textContent = v;
+  $('thresh-display').textContent = v;
+}
+
+// Keep AudioContext alive in background
+document.addEventListener('visibilitychange', () => {
+  if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+});
+
+async function startMic() {
+  if (audioTimer) { log('Already running.', 'warn'); return; }
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    audioCtx  = new AudioContext();
+    if (audioCtx.state === 'suspended') await audioCtx.resume();
+
+    const src = audioCtx.createMediaStreamSource(micStream);
+    analyser  = audioCtx.createAnalyser();
+    analyser.fftSize = 256;
+    analyser.smoothingTimeConstant = 0.5;
+    src.connect(analyser);
+
+    const buf = new Uint8Array(analyser.frequencyBinCount);
+    $('mic-badge').textContent = 'Active'; $('mic-badge').className = 'pill ok';
+    log('Microphone started. Switch to another tab and talk for 3s!', 'ok');
+
+    audioTimer = setInterval(() => {
+      if (!analyser) return;
+      // Resume context if browser throttled it
+      if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+
+      analyser.getByteFrequencyData(buf);
+      const avg = buf.reduce((a, b) => a + b, 0) / buf.length;
+      const pct = Math.min(100, (avg / THRESHOLD) * 25); // visual scale
+
+      $('amp-bar').style.width  = pct + '%';
+      $('amp-val').textContent  = avg.toFixed(1);
+
+      if (avg > THRESHOLD) {
+        if (talkStartMs === null) {
+          talkStartMs = Date.now();
+          log('Voice detected (amp=' + avg.toFixed(1) + ') — 3 s timer started.', 'info');
+        }
+        const elapsed = Date.now() - talkStartMs;
+        const secs    = Math.min(3, elapsed / 1000);
+        $('talk-secs').textContent  = secs.toFixed(2) + ' s';
+        $('timer-fill').style.width = (secs / 3 * 100) + '%';
+
+        if (elapsed >= 3000) {
+          log('🔔 3 s sustained audio! Firing notification now…', 'notif');
+          talkStartMs = Date.now(); // reset — allow re-fire after another 3 s
+          fireTalkNotif();
+        }
+      } else {
+        if (talkStartMs !== null) {
+          log('Silence after ' + ((Date.now() - talkStartMs) / 1000).toFixed(1) + 's.', 'info');
+        }
+        talkStartMs = null;
+        $('talk-secs').textContent  = '0.00 s';
+        $('timer-fill').style.width = '0%';
+      }
+    }, 120);
+
+  } catch(e) { log('Mic error: ' + e, 'fail'); }
+}
+
+function stopMic() {
+  clearInterval(audioTimer); audioTimer = null;
+  if (micStream)  micStream.getTracks().forEach(t => t.stop());
+  if (audioCtx)   audioCtx.close().catch(() => {});
+  micStream = audioCtx = analyser = null; talkStartMs = null;
+  $('mic-badge').textContent = 'off'; $('mic-badge').className = 'pill warn';
+  $('amp-bar').style.width = '0%'; $('timer-fill').style.width = '0%';
+  $('talk-secs').textContent = '0.00 s';
+  log('Microphone stopped.', 'warn');
+}
+
+async function fireTalkNotif() {
+  const title = 'Productifi 🗣️ Stop Talking!';
+  const body  = 'You have been talking for 3+ seconds. Refocus now.';
+  const tag   = 'productifi-talking-test';
+
+  // Direct (works from foreground or when SW not available)
+  if (Notification.permission === 'granted') {
+    try { new Notification(title, { body, tag }); log('Direct talking notification sent.', 'ok'); }
+    catch(e) { log('Direct notif failed: ' + e, 'fail'); }
+  } else {
+    log('Cannot notify — permission not granted. Click "Request Permission" above.', 'fail');
+  }
+
+  // Also try SW (works from background)
+  if ('serviceWorker' in navigator && Notification.permission === 'granted') {
+    try {
+      const reg = await navigator.serviceWorker.ready;
+      await reg.showNotification(title, { body, tag });
+      log('SW talking notification sent.', 'ok');
+    } catch(e) { log('SW notif failed: ' + e, 'fail'); }
+  }
+}
+</script>
+</body>
+</html>

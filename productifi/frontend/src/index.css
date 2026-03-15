@@ -1,0 +1,95 @@
+@import url('https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* UI foundation — blue + teal gradient, cards, shadows, and smooth interactions */
+:root {
+  --gradient-start: #2563eb;
+  --gradient-end: #0d9488;
+  --bg-page: #f4f6f9;
+  --card-shadow: 0 2px 10px rgba(15, 23, 42, 0.06), 0 10px 24px rgba(37, 99, 235, 0.08);
+  --card-shadow-hover: 0 6px 20px rgba(15, 23, 42, 0.08), 0 14px 32px rgba(13, 148, 136, 0.12);
+  --btn-glow: 0 0 18px rgba(37, 99, 235, 0.35), 0 0 32px rgba(13, 148, 136, 0.2);
+  --font-scale: 1;
+}
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+
+  body {
+    font-family: 'Sora', ui-sans-serif, system-ui, sans-serif;
+    background-color: var(--bg-page);
+    background-image: radial-gradient(circle at 12% -10%, rgba(37, 99, 235, 0.1), transparent 42%),
+      radial-gradient(circle at 88% -18%, rgba(13, 148, 136, 0.1), transparent 44%);
+    color: #0f172a;
+    font-size: calc(16px * var(--font-scale));
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  #root {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+}
+
+@layer components {
+  .card {
+    @apply bg-white rounded-2xl;
+    box-shadow: var(--card-shadow);
+    transition: box-shadow 0.25s ease, transform 0.25s ease;
+  }
+  .card:hover {
+    box-shadow: var(--card-shadow-hover);
+  }
+  .btn-primary {
+    background: linear-gradient(135deg, var(--gradient-start), var(--gradient-end));
+    @apply text-white font-medium px-5 py-2.5 rounded-xl transition-all duration-300 text-sm;
+    box-shadow: 0 2px 10px rgba(37, 99, 235, 0.28);
+  }
+  .btn-primary:hover {
+    box-shadow: var(--btn-glow);
+    transform: translateY(-1px);
+  }
+  .btn-ghost {
+    @apply font-medium px-4 py-2 rounded-xl transition-colors text-sm;
+    color: #64748b;
+  }
+  .btn-ghost:hover {
+    color: #334155;
+    background: rgba(91, 140, 255, 0.08);
+  }
+  .gradient-text {
+    background: linear-gradient(135deg, var(--gradient-start), var(--gradient-end));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #f1f5f9;
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

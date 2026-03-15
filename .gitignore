@@ -1,0 +1,32 @@
+.env
+.env.*
+
+# Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Node
+node_modules/
+productifi/backend/node_modules/
+productifi/frontend/node_modules/
+
+# Build outputs
+dist/
+build/
+*.tsbuildinfo
+
+# Logs and runtime files
+*.log
+*.pid
+
+# OS/editor files
+.DS_Store
+.vscode/
+.idea/
+
+# Local archives/artifacts
+*.zip
