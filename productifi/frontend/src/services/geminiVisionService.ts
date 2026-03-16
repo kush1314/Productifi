@@ -18,9 +18,9 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 import type { CVAlert } from './cvService';
 
 // How often to send a frame to Gemini (ms)
-const ANALYSIS_INTERVAL_MS = 8_000;
+const ANALYSIS_INTERVAL_MS = 5_000;
 // Score below which Gemini generates a coaching nudge
-const COACHING_THRESHOLD = 55;
+const COACHING_THRESHOLD = 60;
 // Model — 8b is fast, cheap, and more than accurate enough for this task
 const MODEL_NAME = 'gemini-1.5-flash-8b';
 
@@ -28,31 +28,42 @@ export interface GeminiAnalysis {
   attentionScore: number;
   facePresent: boolean;
   talkingDetected: boolean;
+  lookingAway: boolean;
+  distracted: boolean;
   feedback: string;
   coachingMessage: string;
 }
 
-const VISION_PROMPT = `You are a focus-monitoring AI embedded in a productivity app.
+const VISION_PROMPT = `You are a focus-monitoring AI embedded in a productivity app called Productifi.
 Analyse this webcam snapshot from a live focus session.
 
 Reply with ONLY a valid JSON object — no markdown fences, no extra text:
 {
   "attentionScore": <integer 0-100>,
   "facePresent": <true|false>,
-  "talkingDetected": <true|false>,
-  "feedback": "<≤8 words describing what you observe>",
-  "coachingMessage": "<if attentionScore < 55, one motivational sentence to refocus the user; otherwise empty string>"
+  "talkingDetected": <true|false — mouth open or clearly mid-speech>,
+  "lookingAway": <true|false — eyes directed away from screen/camera>,
+  "distracted": <true|false — any distraction: talking, phone, looking away, multitasking>,
+  "feedback": "<≤12 words: describe exactly what you observe in present tense>",
+  "coachingMessage": "<if attentionScore < 60, one direct actionable sentence to refocus; otherwise empty string>"
 }
 
 Scoring guide:
-100  — face centred, eyes on screen, focused posture
-80   — face visible, mostly on screen, minor drift
-60   — face partially visible or eyes wandering
-40   — face barely visible, talking, or looking far off-screen
-20   — no face / clearly doing something else
-0    — empty frame
+100 — face centred, eyes locked on screen, focused upright posture, fully engaged
+ 85 — face present, mostly on-screen, minor position drift, no distractions
+ 70 — face visible but position drifting, some eye wander or mild disengagement
+ 55 — slight talking, eyes wandering frequently, slouching, or mild distraction detected
+ 40 — clearly talking, looking away from screen, phone visible, or extended distraction
+ 25 — face barely visible, extended looking away, actively multitasking, very unfocused
+ 10 — no face visible, clearly doing something entirely unrelated
+  0 — empty frame or camera blocked
 
-Set talkingDetected=true if the mouth appears open or in mid-speech.`;
+Rules:
+- Set lookingAway=true when eyes point away from screen or are clearly not on the content.
+- Set talkingDetected=true only when the mouth is clearly open in mid-speech or the jaw is moving.
+- Set distracted=true when any of: talkingDetected, lookingAway, phone in frame, or person not at desk.
+- Keep feedback factual and brief (e.g. "eyes on screen, good posture" or "talking, looking to the side").
+- coachingMessage must be warm, specific, and under 20 words.`;
 
 /** Capture one JPEG frame from the <video> element as a base64 string. */
 function captureFrame(video: HTMLVideoElement, quality = 0.65): string | null {
@@ -78,6 +89,8 @@ function parseAnalysis(text: string): GeminiAnalysis | null {
       attentionScore: Math.max(0, Math.min(100, Number(raw.attentionScore) || 0)),
       facePresent: Boolean(raw.facePresent),
       talkingDetected: Boolean(raw.talkingDetected),
+      lookingAway: Boolean(raw.lookingAway),
+      distracted: Boolean(raw.distracted),
       feedback: String(raw.feedback || '').trim(),
       coachingMessage: String(raw.coachingMessage || '').trim(),
     };
@@ -130,9 +143,22 @@ export function useGeminiVision(
         setGeminiAlerts(prev =>
           [{ msg: `Gemini: Talking detected — ${parsed.feedback}`, ts: now }, ...prev].slice(0, 8),
         );
+      } else if (parsed.lookingAway) {
+        setGeminiAlerts(prev =>
+          [{ msg: `Gemini: Eyes away from screen — ${parsed.feedback}`, ts: now }, ...prev].slice(0, 8),
+        );
+      } else if (parsed.distracted) {
+        setGeminiAlerts(prev =>
+          [{ msg: `Gemini: Distraction detected — ${parsed.feedback}`, ts: now }, ...prev].slice(0, 8),
+        );
       } else if (parsed.attentionScore < COACHING_THRESHOLD && parsed.coachingMessage) {
         setGeminiAlerts(prev =>
           [{ msg: `Gemini: ${parsed.coachingMessage}`, ts: now }, ...prev].slice(0, 8),
+        );
+      } else if (parsed.attentionScore >= 85) {
+        // Positive reinforcement every so often
+        setGeminiAlerts(prev =>
+          [{ msg: `Gemini: ✓ ${parsed.feedback}`, ts: now }, ...prev].slice(0, 8),
         );
       }
     } catch (e) {

@@ -17,11 +17,11 @@ self.addEventListener('message', (event) => {
     icon: '/vite.svg',
     badge: '/vite.svg',
     tag: data.tag || 'productifi-focus',
-    // Replace any existing notification with the same tag (no stacking)
-    renotify: true,
-    requireInteraction: false,
-    silent: false,
-    vibrate: [200, 100, 200],
+    // Replace any existing notification with the same tag unless overridden
+    renotify: typeof data.renotify === 'boolean' ? data.renotify : true,
+    requireInteraction: Boolean(data.requireInteraction),
+    silent: typeof data.silent === 'boolean' ? data.silent : false,
+    vibrate: Array.isArray(data.vibrate) ? data.vibrate : [200, 100, 200],
   };
 
   event.waitUntil(self.registration.showNotification(data.title || 'Productifi', options));

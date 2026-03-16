@@ -11,21 +11,29 @@ import { useNavigate } from 'react-router-dom';
 import { useSessionStore } from '../store/sessionStore';
 import { useGeminiVision } from '../services/geminiVisionService';
 import {
+  notifyFocusWithCooldown,
+  sendGuaranteedStayFocusedNotification,
   requestNotificationPermission,
   sendNoFaceNotification,
+  sendCoachingNotification,
+  sendStayFocusedNotification,
   sendTalkingNotification,
   resetNotificationCooldown,
+  triggerFocusNotification,
+  triggerLookAwayNotification,
+  getNotificationsSent,
 } from '../services/notificationService';
-import { Sparkles } from 'lucide-react';
+import { startAudioMonitor } from '../services/audioMonitor';
+import { generateRealtimeCoachMessage } from '../services/realtimeCoachService';
+import { isVoiceCoachSupported, speakCoachMessage, stopVoiceCoach, warmupVoiceCoach } from '../services/voiceCoachService';
+import { Sparkles, Volume2 } from 'lucide-react';
 
-const AUDIO_THRESHOLD = 15;
-const SUSTAINED_TALK_MS = 2000;
-const NOTIF_COOLDOWN_MS = 12000;
+const NOTIF_COOLDOWN_MS = 15000;
 const FACE_INTERVAL_MS = 300;
-const AUDIO_INTERVAL_MS = 80;
 const LOOK_AWAY_TRIGGER_MS = 2000;
 const BACKEND_POLL_INTERVAL_MS = 1200;
-const BACKEND_STATUS_URL = 'http://127.0.0.1:5000/status';
+const BACKEND_STATUS_URL = 'http://localhost:5000/status';
+const PRODUCTIFI_API_URL = import.meta.env.VITE_PRODUCTIFI_API_URL || 'http://localhost:5001';
 
 const SCORE_CONVERSATION_PENALTY = 10;
 const SCORE_LOOK_AWAY_PENALTY = 5;
@@ -84,6 +92,8 @@ export default function SessionPage() {
   const [emotion, setEmotion] = useState('Unknown');
   const [emotionConfidence, setEmotionConfidence] = useState(0);
   const [backendConnected, setBackendConnected] = useState(false);
+  const [micLevel, setMicLevel] = useState(0);
+  const [voiceCoachSupported, setVoiceCoachSupported] = useState(false);
 
   const elapsedRef = useRef(0);
   const scoreRef = useRef(100);
@@ -100,9 +110,26 @@ export default function SessionPage() {
   const nudgeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const backendFacePresentRef = useRef(false);
   const backendConnectedRef = useRef(false);
+  const hiddenSpeechStartRef = useRef<number | null>(null);
+  const hiddenSpeechLastAlertRef = useRef(0);
+  const talkingCountRef = useRef(0);
+  const lookAwayCountRef = useRef(0);
+  const prevGeminiTalkingRef = useRef(false);
+  const distractionsRef = useRef(0);
+  const realtimeCoachInFlightRef = useRef(false);
+  const realtimeCoachLastAtRef = useRef(0);
 
   useEffect(() => { elapsedRef.current = elapsed; }, [elapsed]);
   useEffect(() => { backendConnectedRef.current = backendConnected; }, [backendConnected]);
+  useEffect(() => { distractionsRef.current = distractions; }, [distractions]);
+
+  useEffect(() => {
+    setVoiceCoachSupported(isVoiceCoachSupported());
+    warmupVoiceCoach();
+    return () => {
+      stopVoiceCoach();
+    };
+  }, []);
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', sessionData.themeMode === 'dark');
@@ -120,6 +147,13 @@ export default function SessionPage() {
     if (!geminiAnalysis) return;
     geminiScoreRef.current = geminiAnalysis.attentionScore;
     setGeminiStatus(`Gemini: ${geminiAnalysis.feedback}`);
+    // Visual talking detection: fire notification when talking starts (transition only)
+    if (geminiAnalysis.talkingDetected && !prevGeminiTalkingRef.current) {
+      console.log('[Gemini] Visual talking detected:', geminiAnalysis.feedback);
+      triggerFocusNotification('Conversation detected. Refocus now.');
+      talkingCountRef.current += 1;
+    }
+    prevGeminiTalkingRef.current = geminiAnalysis.talkingDetected;
     if (geminiAnalysis.coachingMessage) {
       setCoachingMessage(geminiAnalysis.coachingMessage);
       setTimeout(() => setCoachingMessage(''), 12000);
@@ -189,6 +223,75 @@ export default function SessionPage() {
     nudgeTimerRef.current = setTimeout(() => setNudgeMessage(''), 4200);
   }, []);
 
+  const deliverCoachMessage = useCallback((message: string, source: 'score-drop' | 'conversation' | 'look-away') => {
+    if (!message) return;
+
+    setCoachingMessage(message);
+    showNudge(message);
+    pushActivity(`AI Coach (${source}): ${message}`);
+
+    if (sessionData.voiceCoachEnabled && voiceCoachSupported) {
+      const spoken = speakCoachMessage(message, {
+        interrupt: source !== 'score-drop',
+        urgent: source !== 'score-drop',
+      });
+      if (spoken) {
+        pushActivity(`AI Voice Coach spoke (${source}).`);
+      }
+    }
+  }, [pushActivity, sessionData.voiceCoachEnabled, showNudge, voiceCoachSupported]);
+
+  const maybeRequestRealtimeCoach = useCallback(async (currentScore: number) => {
+    if (currentScore > 55) return;
+
+    const now = Date.now();
+    const COACH_COOLDOWN_MS = 45_000;
+    if (realtimeCoachInFlightRef.current) return;
+    if (now - realtimeCoachLastAtRef.current < COACH_COOLDOWN_MS) return;
+
+    realtimeCoachInFlightRef.current = true;
+    realtimeCoachLastAtRef.current = now;
+
+    try {
+      const message = await generateRealtimeCoachMessage({
+        score: currentScore,
+        distractions: distractionsRef.current,
+        away: lookAwayCountRef.current,
+        talking: talkingCountRef.current,
+        trigger: 'score-drop',
+        minutesRemaining: Math.max(
+          1,
+          Math.ceil((sessionData.plannedDurationMinutes * 60 - elapsedRef.current) / 60),
+        ),
+        sessionGoal: sessionData.productivityGoal,
+      });
+
+      if (!message) return;
+
+      deliverCoachMessage(message, 'score-drop');
+      await sendCoachingNotification(message);
+    } catch (error) {
+      console.warn('[Productifi] realtime coaching failed:', error);
+    } finally {
+      realtimeCoachInFlightRef.current = false;
+    }
+  }, [deliverCoachMessage, sessionData.plannedDurationMinutes, sessionData.productivityGoal]);
+
+  useEffect(() => {
+    const onVisibilityChange = () => {
+      if (document.hidden) {
+        console.log('[Productifi] User switched tabs');
+        pushActivity('User switched tabs (document.hidden=true).');
+      } else {
+        console.log('[Productifi] User returned to Productifi tab');
+        pushActivity('User returned to Productifi tab.');
+      }
+    };
+
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', onVisibilityChange);
+  }, [pushActivity]);
+
   const playAlertTone = useCallback(() => {
     if (typeof window === 'undefined') return;
     const ACtx = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
@@ -209,24 +312,76 @@ export default function SessionPage() {
     oscillator.onended = () => ctx.close().catch(() => {});
   }, []);
 
+  const triggerCriticalTalkingAlert = useCallback(async (source: 'hidden-audio' | 'sustained') => {
+    console.log('[Productifi] Triggering focus notification (hidden immediate path)', { source });
+    const sent = await sendGuaranteedStayFocusedNotification('Conversation detected. Refocus now.');
+    if (sent) {
+      setDistractions((d) => d + 1);
+      pushActivity(
+        source === 'hidden-audio'
+          ? 'Background speech detected: immediate focus notification sent.'
+          : 'Hidden-tab sustained speech: immediate focus notification sent.',
+      );
+      return true;
+    }
+
+    console.log('[Productifi] Immediate focus notification blocked');
+    pushActivity('Immediate notification blocked (permission/browser policy).');
+
+    return false;
+  }, [pushActivity]);
+
   const fireNotification = useCallback(async (reason: 'conversation' | 'look_away') => {
+    // Look-away: direct notification (own cooldown, fires on visible or hidden tab)
+    if (reason === 'look_away') {
+      triggerLookAwayNotification('You looked away \u2014 refocus now.');
+      lookAwayCountRef.current += 1;
+    }
     const now = Date.now();
     if (now - lastNotifAtRef.current < NOTIF_COOLDOWN_MS) return;
     lastNotifAtRef.current = now;
     setDistractions(d => d + 1);
     const msg = reason === 'conversation' ? 'Distraction: conversation detected.' : 'Distraction: looking away.';
     pushActivity(msg);
+    console.log('[Productifi] Distraction detected', { reason, hidden: document.hidden });
 
     const minutesRemaining = Math.max(
       1,
       Math.ceil((sessionData.plannedDurationMinutes * 60 - elapsedRef.current) / 60),
     );
 
+    let coachMessage = '';
+    try {
+      coachMessage = await generateRealtimeCoachMessage({
+        score: Math.round(scoreRef.current),
+        distractions: distractionsRef.current,
+        away: lookAwayCountRef.current,
+        talking: talkingCountRef.current,
+        trigger: reason === 'conversation' ? 'conversation' : 'look-away',
+        minutesRemaining,
+        sessionGoal: sessionData.productivityGoal,
+      });
+    } catch (error) {
+      console.warn('[Productifi] distraction coach message failed:', error);
+    }
+
     try {
       let dispatched = false;
       if (sessionData.notificationsEnabled && (sessionData.alertMode === 'notification' || sessionData.alertMode === 'both')) {
-        if (reason === 'conversation') dispatched = await sendTalkingNotification(minutesRemaining);
-        else dispatched = await sendNoFaceNotification(minutesRemaining);
+        if (document.hidden) {
+          const hiddenMessage = reason === 'conversation'
+            ? 'Conversation detected. Refocus now.'
+            : 'Distraction detected. Refocus now.';
+          console.log('[Productifi] Triggering focus notification (hidden distraction event)');
+          dispatched = await sendGuaranteedStayFocusedNotification(hiddenMessage);
+        } else if (reason === 'conversation') {
+          dispatched = notifyFocusWithCooldown('Conversation detected. Refocus now.', NOTIF_COOLDOWN_MS);
+          if (!dispatched) dispatched = await sendStayFocusedNotification();
+          if (!dispatched) dispatched = await sendTalkingNotification(minutesRemaining);
+        }
+        else {
+          dispatched = await sendNoFaceNotification(minutesRemaining);
+        }
       }
 
       if (sessionData.alertMode === 'sound' || sessionData.alertMode === 'both') {
@@ -240,12 +395,20 @@ export default function SessionPage() {
         showNudge(fallback);
         pushActivity(`In-app nudge: ${fallback}`);
       }
+
+      if (coachMessage) {
+        deliverCoachMessage(coachMessage, reason === 'conversation' ? 'conversation' : 'look-away');
+      }
     } catch (e) {
       console.error('[Productifi] notification failed:', e);
       const fallback = reason === 'conversation'
         ? 'Conversation detected. Refocus now.'
         : 'No face or focus drift detected. Return to screen.';
       showNudge(fallback);
+
+      if (coachMessage) {
+        deliverCoachMessage(coachMessage, reason === 'conversation' ? 'conversation' : 'look-away');
+      }
     }
 
     const strictnessMultiplier = 0.7 + (sessionData.sensitivity / 100) * 0.9;
@@ -253,7 +416,7 @@ export default function SessionPage() {
     const penalty = Math.round(basePenalty * strictnessMultiplier);
     scoreRef.current = Math.max(0, scoreRef.current - penalty);
     setScore(scoreRef.current);
-  }, [pushActivity, playAlertTone, sessionData.alertMode, sessionData.notificationsEnabled, sessionData.plannedDurationMinutes, sessionData.sensitivity, showNudge]);
+  }, [deliverCoachMessage, pushActivity, playAlertTone, sessionData.alertMode, sessionData.notificationsEnabled, sessionData.plannedDurationMinutes, sessionData.productivityGoal, sessionData.sensitivity, showNudge]);
 
   // Timer
   useEffect(() => {
@@ -268,11 +431,9 @@ export default function SessionPage() {
 
     let mounted = true;
     let stream: MediaStream | null = null;
-    let audioCtx: AudioContext | null = null;
     let faceInterval: ReturnType<typeof setInterval> | undefined;
-    let audioInterval: ReturnType<typeof setInterval> | undefined;
     let scoreInterval: ReturnType<typeof setInterval> | undefined;
-    let talkStartMs: number | null = null;
+    let stopAudioMonitor: (() => void) | null = null;
 
     lastNotifAtRef.current = 0;
     resetNotificationCooldown();
@@ -280,6 +441,14 @@ export default function SessionPage() {
     lookAwayStartRef.current = null;
     leftFrameStartRef.current = null;
     noFaceSecondsRef.current = 0;
+    hiddenSpeechStartRef.current = null;
+    hiddenSpeechLastAlertRef.current = 0;
+    talkingCountRef.current = 0;
+    lookAwayCountRef.current = 0;
+    prevGeminiTalkingRef.current = false;
+    distractionsRef.current = 0;
+    realtimeCoachInFlightRef.current = false;
+    realtimeCoachLastAtRef.current = 0;
 
     const ensureNotifPermission = async () => {
       if (typeof Notification === 'undefined') return;
@@ -292,10 +461,6 @@ export default function SessionPage() {
       if (mounted && result !== 'granted' && notificationsEnabled) {
         pushActivity('Notifications unavailable: browser permission not granted. Using in-app alerts.');
       }
-    };
-
-    const handleVisibility = () => {
-      if (audioCtx?.state === 'suspended') audioCtx.resume().catch(() => {});
     };
 
     const init = async () => {
@@ -316,57 +481,48 @@ export default function SessionPage() {
         setCameraReady(true);
         pushActivity('Camera and microphone ready');
 
-        audioCtx = new AudioContext();
-        if (audioCtx.state === 'suspended') await audioCtx.resume();
+        stopAudioMonitor = await startAudioMonitor({
+          stream,
+          volumeThreshold: 4,
+          // Fire as soon as ~300 ms of continuous speech detected
+          sustainedMs: 300,
+          // Cooldown matches notification cooldown so every trigger fires a notification
+          cooldownMs: 15000,
+          onVolumeChange: (_vol, speaking) => {
+            if (!mounted) return;
+            setMicLevel(Math.round(_vol));
+            setIsTalking(speaking);
 
-        const source = audioCtx.createMediaStreamSource(stream);
-        const analyser = audioCtx.createAnalyser();
-        analyser.fftSize = 256;
-        analyser.smoothingTimeConstant = 0.6;
-        source.connect(analyser);
-
-        const freqData = new Uint8Array(analyser.frequencyBinCount);
-        const timeData = new Uint8Array(analyser.fftSize);
-
-        document.addEventListener('visibilitychange', handleVisibility);
-
-        audioInterval = setInterval(() => {
-          if (!mounted || !audioCtx || !analyser) return;
-          if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
-
-          if (!monitorsTalking) {
-            talkStartMs = null;
-            if (mounted) setIsTalking(false);
-            return;
-          }
-
-          analyser.getByteFrequencyData(freqData);
-          let sumF = 0;
-          for (let i = 0; i < freqData.length; i++) sumF += freqData[i];
-          const avgFreq = freqData.length > 0 ? sumF / freqData.length : 0;
-
-          analyser.getByteTimeDomainData(timeData);
-          let sumT = 0;
-          for (let i = 0; i < timeData.length; i++) {
-            const n = (timeData[i] - 128) / 128;
-            sumT += n * n;
-          }
-          const rms = Math.sqrt(sumT / timeData.length) * 100;
-          const amplitude = avgFreq * 0.5 + rms * 0.5;
-          const isLoud = amplitude > AUDIO_THRESHOLD;
-
-          if (isLoud) {
-            if (talkStartMs === null) talkStartMs = Date.now();
-            if (mounted) setIsTalking(true);
-            if (Date.now() - talkStartMs >= SUSTAINED_TALK_MS) {
-              fireNotification('conversation');
-              talkStartMs = Date.now();
+            if (document.hidden && speaking) {
+              // Fire immediately on any speech while hidden — 10s cooldown is in triggerFocusNotification
+              triggerFocusNotification('Conversation detected. Refocus now.');
+            } else {
+              hiddenSpeechStartRef.current = null;
             }
-          } else {
-            talkStartMs = null;
-            if (mounted) setIsTalking(false);
-          }
-        }, AUDIO_INTERVAL_MS);
+          },
+          onSustainedSpeech: async () => {
+            if (!mounted) return;
+            talkingCountRef.current += 1;
+            console.log("[Audio] Conversation detected event fired", {
+              hidden: document.hidden,
+              permission: Notification.permission,
+            });
+            console.log('[Productifi] Speech detected — sending Stay Focused notification', { hidden: document.hidden });
+
+            // Direct path: fires immediately when hidden, subject only to 10s cooldown
+            triggerFocusNotification("Conversation detected. Refocus now.");
+
+            // Keep existing fallback routing for visible-tab in-app nudges
+            if (document.hidden) {
+              const sent = await triggerCriticalTalkingAlert('sustained');
+              if (sent) return;
+            }
+
+            // Visible tab path — also fires notification unconditionally
+            await fireNotification('conversation');
+          },
+        });
+        pushActivity('Background audio monitor active');
 
         if (mounted) setMicReady(true);
 
@@ -492,7 +648,9 @@ export default function SessionPage() {
             const decay = Math.min(10, 3.6 + noFaceSecondsRef.current * 0.45);
             const degradedFloor = backendConnectedRef.current ? 0 : 12;
             scoreRef.current = Math.max(degradedFloor, scoreRef.current - decay);
-            setScore(Math.round(scoreRef.current));
+            const rounded = Math.round(scoreRef.current);
+            setScore(rounded);
+            void maybeRequestRealtimeCoach(rounded);
             return;
           }
 
@@ -506,7 +664,9 @@ export default function SessionPage() {
           const delta = target - scoreRef.current;
           const step = Math.max(-6, Math.min(4.5, delta * 0.24));
           scoreRef.current = Math.max(0, Math.min(100, scoreRef.current + step));
-          setScore(Math.round(scoreRef.current));
+          const rounded = Math.round(scoreRef.current);
+          setScore(rounded);
+          void maybeRequestRealtimeCoach(rounded);
         }, 1000);
 
       } catch (err) {
@@ -523,18 +683,40 @@ export default function SessionPage() {
     return () => {
       mounted = false;
       if (faceInterval) clearInterval(faceInterval);
-      if (audioInterval) clearInterval(audioInterval);
       if (scoreInterval) clearInterval(scoreInterval);
+      if (stopAudioMonitor) stopAudioMonitor();
       if (nudgeTimerRef.current) clearTimeout(nudgeTimerRef.current);
-      document.removeEventListener('visibilitychange', handleVisibility);
       if (stream) stream.getTracks().forEach(t => t.stop());
-      if (audioCtx) audioCtx.close().catch(() => {});
     };
-  }, [isActive, fireNotification, monitorsGaze, monitorsTalking, notificationsEnabled, pushActivity, sensitivity]);
+  }, [isActive, fireNotification, maybeRequestRealtimeCoach, monitorsGaze, monitorsTalking, notificationsEnabled, pushActivity, sensitivity, triggerCriticalTalkingAlert]);
 
   const endSession = () => {
+    void fetch(`${PRODUCTIFI_API_URL}/api/end-session`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sessionData: {
+          sessionName: sessionData.sessionName,
+          sessionType: sessionData.sessionType,
+          productivityGoal: sessionData.productivityGoal,
+          plannedDurationMinutes: sessionData.plannedDurationMinutes,
+          harshness: sessionData.harshness,
+        },
+        finalScore: score,
+      }),
+    }).catch((error) => {
+      console.warn('[Productifi] Failed to log end-session to backend:', error);
+    });
+
     setIsActive(false);
-    sessionData.recordCompletedSession(distractions, score, elapsed);
+    sessionData.recordCompletedSession(
+      distractions,
+      score,
+      elapsed,
+      getNotificationsSent(),
+      talkingCountRef.current,
+      lookAwayCountRef.current,
+    );
     navigate('/report');
   };
 
@@ -697,7 +879,13 @@ export default function SessionPage() {
             <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Status</p>
             <StatusRow label="Camera" value={cameraReady ? 'On' : 'Off'} ok={cameraReady} />
             <StatusRow label="Microphone" value={!micReady ? 'Off' : isTalking ? 'Speaking' : 'Listening'} ok={micReady} />
+            <StatusRow label="Mic level" value={`${micLevel}`} ok={micLevel > 0} />
             <StatusRow label="Notifications" value={notifGranted ? 'Enabled' : 'Disabled'} ok={notifGranted} />
+            <StatusRow
+              label="AI Voice Coach"
+              value={sessionData.voiceCoachEnabled ? (voiceCoachSupported ? 'Enabled' : 'Unsupported') : 'Disabled'}
+              ok={!sessionData.voiceCoachEnabled || voiceCoachSupported}
+            />
             <StatusRow label="Face" value={facePresent ? 'Detected' : 'Not detected'} ok={facePresent} />
             <StatusRow label="Eyes on screen" value={eyesFocused ? 'Yes' : 'No'} ok={eyesFocused} />
             <StatusRow label="Speaking" value={monitorsTalking ? (isTalking ? 'Yes' : 'No') : 'Disabled'} ok={!monitorsTalking || !isTalking} />
@@ -708,6 +896,19 @@ export default function SessionPage() {
               value={emotionConfidence > 0 ? `${emotion} (${emotionConfidence}%)` : emotion}
               ok={emotion !== 'Unknown'}
             />
+          </div>
+
+          <div className="card p-5 border border-slate-100 bg-gradient-to-br from-[#2563eb]/5 to-[#0d9488]/5">
+            <div className="flex items-center justify-between mb-2">
+              <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Live AI Coach</p>
+              <span className="inline-flex items-center gap-1 text-xs text-[#0f766e] font-medium">
+                <Volume2 className="w-3.5 h-3.5" />
+                {sessionData.voiceCoachEnabled ? (voiceCoachSupported ? 'Voice on' : 'Voice unsupported') : 'Voice off'}
+              </span>
+            </div>
+            <p className="text-sm text-slate-700 leading-relaxed">
+              {coachingMessage || 'Coach is monitoring your live score. When focus drops, you will get instant AI guidance and optional voice feedback.'}
+            </p>
           </div>
 
           <div className="card p-5 border border-slate-100">

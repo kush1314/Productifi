@@ -1,0 +1,17 @@
+{
+  "name": "Productifi",
+  "short_name": "Productifi",
+  "description": "Focus measurement and productivity monitoring",
+  "start_url": "/",
+  "display": "standalone",
+  "theme_color": "#2563eb",
+  "background_color": "#f4f6f9",
+  "icons": [
+    {
+      "src": "/vite.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

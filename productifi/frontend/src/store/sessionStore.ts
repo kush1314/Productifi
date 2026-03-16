@@ -33,6 +33,7 @@ const savedStreak = loadStreakFromStorage();
 type UserPreferences = {
   notificationsEnabled: boolean;
   alertMode: AlertMode;
+  voiceCoachEnabled: boolean;
   sensitivity: number;
   themeMode: ThemeMode;
   accentColor: string;
@@ -42,6 +43,7 @@ type UserPreferences = {
 const defaultPreferences: UserPreferences = {
   notificationsEnabled: true,
   alertMode: 'notification',
+  voiceCoachEnabled: true,
   sensitivity: 55,
   themeMode: 'light',
   accentColor: '#2563eb',
@@ -60,6 +62,9 @@ function loadPreferencesFromStorage(): UserPreferences {
       alertMode: (parsed.alertMode === 'notification' || parsed.alertMode === 'sound' || parsed.alertMode === 'both')
         ? parsed.alertMode
         : defaultPreferences.alertMode,
+      voiceCoachEnabled: typeof parsed.voiceCoachEnabled === 'boolean'
+        ? parsed.voiceCoachEnabled
+        : defaultPreferences.voiceCoachEnabled,
       sensitivity: typeof parsed.sensitivity === 'number'
         ? Math.max(0, Math.min(100, parsed.sensitivity))
         : defaultPreferences.sensitivity,
@@ -98,6 +103,7 @@ interface SessionState {
   harshness: 'lenient' | 'realistic' | 'strict';
   notificationsEnabled: boolean;
   alertMode: AlertMode;
+  voiceCoachEnabled: boolean;
   sensitivity: number;
   themeMode: ThemeMode;
   accentColor: string;
@@ -113,10 +119,13 @@ interface SessionState {
   sessionDistractions: number;
   avgAttention: number;
   sessionSeconds: number;
+  notificationCount: number;
+  talkingDetections: number;
+  lookAwayCount: number;
 
   // Actions
   setField: <K extends keyof SessionState>(field: K, value: SessionState[K]) => void;
-  recordCompletedSession: (distractions: number, avgAttention: number, seconds: number) => void;
+  recordCompletedSession: (distractions: number, avgAttention: number, seconds: number, notificationCount?: number, talkingDetections?: number, lookAwayCount?: number) => void;
 }
 
 export const useSessionStore = create<SessionState>((set, get) => ({
@@ -129,6 +138,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   harshness: 'realistic',
   notificationsEnabled: savedPreferences.notificationsEnabled,
   alertMode: savedPreferences.alertMode,
+  voiceCoachEnabled: savedPreferences.voiceCoachEnabled,
   sensitivity: savedPreferences.sensitivity,
   themeMode: savedPreferences.themeMode,
   accentColor: savedPreferences.accentColor,
@@ -144,12 +154,16 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   sessionDistractions: 0,
   avgAttention: 0,
   sessionSeconds: 0,
+  notificationCount: 0,
+  talkingDetections: 0,
+  lookAwayCount: 0,
 
   setField: (field, value) => set(state => {
     const next = { ...state, [field]: value } as SessionState;
     savePreferencesToStorage({
       notificationsEnabled: next.notificationsEnabled,
       alertMode: next.alertMode,
+      voiceCoachEnabled: next.voiceCoachEnabled,
       sensitivity: next.sensitivity,
       themeMode: next.themeMode,
       accentColor: next.accentColor,
@@ -166,7 +180,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     return next;
   }),
 
-  recordCompletedSession: (distractions, avgAttention, seconds) => {
+  recordCompletedSession: (distractions, avgAttention, seconds, notificationCount = 0, talkingDetections = 0, lookAwayCount = 0) => {
     const state = get();
     const today = new Date().toDateString();
     const yesterday = new Date(Date.now() - 86_400_000).toDateString();
@@ -196,6 +210,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       sessionDistractions: distractions,
       avgAttention,
       sessionSeconds: seconds,
+      notificationCount,
+      talkingDetections,
+      lookAwayCount,
       currentStreak: newStreak,
       longestStreak: newLongest,
       lastSessionDate: today,
